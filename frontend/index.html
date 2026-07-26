@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuditGPT</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+<div class="page">
+  <!-- app.py의 헤더 마크업(로고+제목+부제)을 그대로 옮김. 문구도 원본과 동일하게 유지. -->
+  <div class="app-header">
+    <div class="title-row">
+      <img src="logo.png" alt="AuditGPT logo">
+      <span>AuditGPT</span>
+    </div>
+    <div class="subtitle">K-IFRS · DART · KAM · Guidebooks &nbsp;|&nbsp; 3-Source RAG &nbsp;|&nbsp; 회계·감사 어시스턴트</div>
+  </div>
+
+  <div id="chat-log"></div>
+</div>
+
+<div class="input-bar">
+  <div class="chat-input-shell">
+    <textarea id="chat-input" rows="1" placeholder="AI에게 질문해 주세요."></textarea>
+    <button id="send-btn" disabled aria-label="전송">
+      <svg width="20" height="20" viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+    </button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

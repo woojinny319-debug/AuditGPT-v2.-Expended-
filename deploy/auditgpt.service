@@ -1,0 +1,15 @@
+[Unit]
+Description=AuditGPT FastAPI backend
+After=network.target
+
+[Service]
+# 실제 배포 경로/사용자로 교체해서 사용하세요.
+User=auditgpt
+WorkingDirectory=/opt/auditgpt
+EnvironmentFile=/opt/auditgpt/.env
+ExecStart=/opt/auditgpt/venv/bin/gunicorn backend.main:app -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8000 -w 2
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
