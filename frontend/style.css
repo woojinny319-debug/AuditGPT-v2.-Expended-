@@ -141,6 +141,29 @@ html, body {
     margin-bottom: 0.35em;
     line-height: 1.75;
 }
+/* 표 — marked.js가 만드는 <table>에 기본 테두리/줄무늬가 전혀 없어서(2026-07-26 발견),
+   비교 질문에서 표가 "테두리 없이 글자만" 나오는 문제가 있었다. 기존 팔레트로 스타일링. */
+.chat-message.assistant .chat-content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.6em 0 1em 0;
+    font-size: 12.5px;
+}
+.chat-message.assistant .chat-content th,
+.chat-message.assistant .chat-content td {
+    border: 1px solid #dde3ea;
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+}
+.chat-message.assistant .chat-content th {
+    background: #f0f4f9;
+    font-weight: 600;
+    color: #1f1f1f;
+}
+.chat-message.assistant .chat-content tr:nth-child(even) td {
+    background: #fafbfc;
+}
 
 /* ═══════════════════════════════════════
    입력창 — Gemini 스타일 pill

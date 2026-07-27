@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import pickle
+import re
 import shutil
 import time
 from pathlib import Path
@@ -344,20 +345,80 @@ def _enrich(docs: list[Document]) -> list[Document]:
     return out
 
 
+_YEAR_IN_QUERY_RE = re.compile(r"(20\d{2})\s*년")
+
+# _company_docs가 매 요청마다 쓸 수 있도록 미리 만들어둘 회사(+연도)별 BM25 상한.
+# _get_relevant_documents의 per(최대 50)를 커버할 만큼 넉넉히 잡고, 실제로는 그때그때 k로 슬라이싱한다.
+_DART_BM25_PRECOMPUTE_K = 50
+
+
+def _build_per_company_bm25(bm25_docs: list[Document]) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
+    """DART 전체 BM25 코퍼스를 (기업, 연도)별 / 기업별로 미리 나눠 BM25Retriever를 한 번만 구축한다.
+
+    [응답 속도] 예전엔 질의가 들어올 때마다(비교 질문이면 기업 수만큼 반복해서) _company_docs
+    안에서 BM25Retriever.from_documents()로 토큰화·인덱스 구축을 매번 새로 했다. 이게 답변
+    생성이 1분 넘게 걸리는 원인 중 하나였다(2026-07-26 진단). 서버 시작 시(get_dart_retriever
+    호출 시점) 딱 1번만 구축해두고, 요청마다는 조회만 하도록 바꾼다.
+    """
+    from collections import defaultdict
+    from langchain_community.retrievers import BM25Retriever
+
+    by_company_year: dict[tuple[str, str], list[Document]] = defaultdict(list)
+    by_company: dict[str, list[Document]] = defaultdict(list)
+    for d in bm25_docs:
+        company = d.metadata.get("company")
+        year = d.metadata.get("year")
+        if not company:
+            continue
+        by_company[company].append(d)
+        if year:
+            by_company_year[(company, year)].append(d)
+
+    company_year_bm25 = {
+        key: BM25Retriever.from_documents(_enrich(docs), k=_DART_BM25_PRECOMPUTE_K)
+        for key, docs in by_company_year.items()
+    }
+    company_bm25 = {
+        company: BM25Retriever.from_documents(_enrich(docs), k=_DART_BM25_PRECOMPUTE_K)
+        for company, docs in by_company.items()
+    }
+    return company_year_bm25, company_bm25
+
+
 class DynamicDartRetriever(BaseRetriever):
     collection_name: str
     embeddings: Any
     global_bm25_docs: list
     global_bm25_retriever: Any
+    company_year_bm25: dict
+    company_bm25: dict
 
-    def _company_docs(self, query: str, qv: list[float], company: str, k: int) -> list[Document]:
-        """단일 기업으로 필터링한 벡터+BM25 하이브리드 결과(RRF)."""
-        semantic = _robust_query(self.collection_name, qv, k, where={"company": company})
-        comp_bm25_docs = [d for d in self.global_bm25_docs if d.metadata.get("company") == company]
-        if comp_bm25_docs:
-            from langchain_community.retrievers import BM25Retriever
-            bm25 = BM25Retriever.from_documents(_enrich(comp_bm25_docs), k=k)
-            return _rrf([semantic, bm25.invoke(query)])
+    def _latest_year_for(self, company: str) -> str | None:
+        years = [d.metadata.get("year") for d in self.global_bm25_docs if d.metadata.get("company") == company]
+        years = [y for y in years if y]
+        return max(years) if years else None
+
+    def _company_docs(self, query: str, qv: list[float], company: str, k: int, year: str | None) -> list[Document]:
+        """단일 기업(+가능하면 단일 연도)으로 필터링한 벡터+BM25 하이브리드 결과(RRF).
+
+        [연도 정합성] 예전엔 기업별로 독립적으로 최고점 청크만 뽑아서, "A와 B를 비교해줘" 질문에
+        A는 2024년 자료가, B는 2025년 자료가 섞여 나오는 문제가 있었다(2026-07-26 진단 — 비교
+        질문인데 회계연도가 안 맞으면 감사 자료로서 무의미하다). 질의에 특정 연도가 없으면 그
+        기업의 "가장 최근 연도"로 고정해서, 비교 대상 기업들의 회계연도를 자동으로 맞춘다.
+        해당 연도 데이터가 실제로 없으면(수집 누락 등) 연도 제한을 풀고 폴백한다.
+        """
+        # [주의] chromadb는 where 딕셔너리에 최상위 키(연산자)가 정확히 1개여야 한다
+        # ({"company": x, "year": y}처럼 암묵적 AND는 지원 안 함 — "$and"로 명시해야 함).
+        bm25 = self.company_year_bm25.get((company, year)) if year else None
+        if bm25 is not None:
+            where: dict = {"$and": [{"company": company}, {"year": year}]}
+        else:
+            where = {"company": company}
+            bm25 = self.company_bm25.get(company)
+
+        semantic = _robust_query(self.collection_name, qv, k, where=where)
+        if bm25 is not None:
+            return _rrf([semantic, bm25.invoke(query)[:k]])
         return semantic
 
     def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
@@ -367,10 +428,15 @@ class DynamicDartRetriever(BaseRetriever):
         if positive:
             # [다중 기업] 각 기업별로 따로 검색해 라운드로빈으로 합쳐 *모든 기업의 대표성*을 보장.
             # (기존엔 첫 기업만 필터링해 비교 질문에서 나머지 기업이 누락됐다 — 2026-06-20 Q3 개선)
-            print(f"[DynamicDartRetriever] 대상 기업 {positive} 감지. 기업별 균형 검색.")
-            per = max(15, 40 // len(positive))
-            per_company = [self._company_docs(query, qv, comp, per) for comp in positive]
-            return _interleave(per_company, limit=24)
+            year_match = _YEAR_IN_QUERY_RE.search(query)
+            explicit_year = year_match.group(1) if year_match else None
+            print(f"[DynamicDartRetriever] 대상 기업 {positive} 감지 (연도: {explicit_year or '기업별 최신'}). 기업별 균형 검색.")
+            per = max(15, 50 // len(positive))
+            per_company = [
+                self._company_docs(query, qv, comp, per, explicit_year or self._latest_year_for(comp))
+                for comp in positive
+            ]
+            return _interleave(per_company, limit=30)
 
         # 포함 대상이 없음 → 전역 검색. 단, 제외 대상(예: "삼천당이 아닌")이 있으면 필터로 뺀다.
         where = {"company": {"$nin": negated}} if negated else None
@@ -600,11 +666,18 @@ def get_dart_retriever(embeddings: OpenAIEmbeddings) -> BaseRetriever | None:
     # Step 3: 리트리버 생성 (직접 chromadb 쿼리 기반 — langchain Chroma store 불필요)
     from langchain_community.retrievers import BM25Retriever
     global_bm25 = BM25Retriever.from_documents(_enrich(bm25_docs), k=30)
+    # 기업(+연도)별 BM25도 여기서(서버 시작 시 1회) 미리 구축 — 요청마다 다시 만들지 않는다.
+    company_year_bm25, company_bm25 = _build_per_company_bm25(bm25_docs)
     base = DynamicDartRetriever(
         collection_name=collection,
         embeddings=embeddings,
         global_bm25_docs=bm25_docs,
+        company_year_bm25=company_year_bm25,
+        company_bm25=company_bm25,
         global_bm25_retriever=global_bm25,
     )
     print("[OK] DART 하이브리드 리트리버 생성 완료")
-    return _build_2stage(base, rerank_top_n=10)
+    # rerank_top_n=10은 원래 기업 1곳 기준 질문에 맞춰 튜닝된 값이라, 2개 이상 기업을
+    # 비교할 때 기업당 몇 개 청크밖에 안 남아 리스부채·사용권자산처럼 여러 하위 표로
+    # 나뉜 주석의 세부 항목이 잘려나갔다(2026-07-26 진단). 다산업 확장 이후 기본값을 20으로 상향.
+    return _build_2stage(base, rerank_top_n=20)

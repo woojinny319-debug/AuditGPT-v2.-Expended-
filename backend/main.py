@@ -134,7 +134,7 @@ def _build_source_context(
     kifrs_docs: list[Document], dart_docs: list[Document], guidebook_docs: list[Document]
 ) -> tuple[str, list[dict[str, str]]]:
     kifrs_docs = _trim_docs(kifrs_docs, max_docs=4, max_chars=2000)
-    dart_docs = _trim_docs(dart_docs, max_docs=15, max_chars=3500)
+    dart_docs = _trim_docs(dart_docs, max_docs=20, max_chars=3500)
     guidebook_docs = _trim_docs(guidebook_docs, max_docs=3, max_chars=1500)
 
     p1, c1 = format_cited_docs(kifrs_docs, 1)
@@ -252,9 +252,21 @@ def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(answer=answer, sources=sources)
 
 
+class _NoCacheStaticFiles(StaticFiles):
+    """기본 StaticFiles는 Cache-Control 헤더를 전혀 안 붙여서, 브라우저가 자체 판단으로
+    style.css/app.js를 한동안 캐싱해버린다(2026-07-27 진단 — 서버는 새 CSS를 내려주는데
+    브라우저는 새로고침만으로 재요청을 안 해서 옛 스타일이 계속 보이는 문제). 매번 서버에
+    재확인(revalidate)하도록 강제해, 프론트엔드 파일을 고칠 때마다 즉시 반영되게 한다."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # 정적 프론트엔드(index.html/style.css/app.js) 서빙. 운영 환경에서는 Nginx가 이 역할을
 # 대신 맡을 수 있지만(AuditGPT_웹전환_구현계획서 3-4절), 로컬 개발/단일 프로세스 배포에서는
 # FastAPI가 직접 서빙하면 별도 웹서버 없이도 바로 동작한다.
 _FRONTEND_DIR = PROJECT_ROOT / "frontend"
 if _FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+    app.mount("/", _NoCacheStaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
